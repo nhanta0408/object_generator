@@ -15,6 +15,8 @@ class CSharpGeneratorModel {
       var vars = getListVariable(lines);
       var propsList = generatePropsList(lines);
       var baseFromJson = generateBaseFromJson(vars);
+      var baseToJson = generateBaseToJson(vars);
+
       // var propsList = generatePropsList(lines);
       // var jsonResult = generateJsonKey(lines, vars);
       // var initComponent = generatedInit(lines, vars);
@@ -53,7 +55,10 @@ class CSharpGeneratorModel {
       //       $baseFromJson
       //     }
       // ''';
-      return baseFromJson;
+      return '''
+        $baseFromJson
+        $baseToJson
+      ''';
     }
     return '''
        
@@ -71,15 +76,24 @@ class CSharpGeneratorModel {
         .trim();
   }
 
-  List<Variable> getListVariable(List<String> lines) {
-    var vars = <Variable>[];
+  List<VariableCSharp> getListVariable(List<String> lines) {
+    var vars = <VariableCSharp>[];
     for (var i = 2; i < lines.length - 1; i++) {
       final line = lines[i].replaceAll(RegExp(' +'), ' ').trimLeft();
       final varType = line.split(' ')[1];
       final varName = line.split(' ')[2];
-      final isPrimaryType = (CSharpConstants.allTypes.contains(varType));
-      vars.add(
-          Variable(name: varName, type: varType, isPrimaryType: isPrimaryType));
+      VariableType variableType;
+      if (CSharpConstants.allTypes.contains(varType)) {
+        variableType = VariableType.primaryType;
+      } else if (line.contains('//Enum')) {
+        variableType = VariableType.enumType;
+      } else if (varType.contains('List<')) {
+        variableType = VariableType.listObjectType;
+      } else {
+        variableType = VariableType.objectType;
+      }
+      vars.add(VariableCSharp(
+          name: varName, type: varType, variableType: variableType));
     }
     print("Danh sách var: $vars");
     return vars;
@@ -93,23 +107,60 @@ class CSharpGeneratorModel {
     return propsResult;
   }
 
-  String baseFromJsonCase(List<Variable> vars) {
+  String baseFromJsonCase(List<VariableCSharp> vars) {
     var result = "";
     for (var variable in vars) {
-      var newCase = '''
-         case "$variable":
-            var value = properties["valueString"];
-            var valueType = properties["valueType"];
-            result$objectName.$variable = Constant.getValue(value, valueType);
+      if (variable.variableType == VariableType.primaryType) {
+        var newCase = '''
+         case "${variable.name}":
+            result$objectName.${variable.name} = Constant.getValue(properties["valueString"], properties["valueType"]);
             break;
             
       ''';
-      result += newCase;
+        result += newCase;
+      } else if (variable.variableType == VariableType.enumType) {
+        var newCase = '''
+         case "${variable.name}":
+         result$objectName.${variable.name} = (${variable.type})Enum.Parse(typeof(${variable.type}), properties["valueString"], true);
+            break;
+            
+      ''';
+        result += newCase;
+      } else if (variable.variableType == VariableType.objectType) {
+        var newCase = '''
+         case "${variable.name}":
+          List<Dictionary<string, dynamic>> dict${variable.name} = Newtonsoft.Json.JsonConvert.DeserializeObject<List<Dictionary<string, dynamic>>>(properties["valueString"]);
+         result$objectName.${variable.name} = dict${variable.name} != null ? ${variable.type.replaceAll('?', '')}.baseFromJson(dDict${variable.name}) : null;
+            break;
+      ''';
+        result += newCase;
+      } else {
+        var newCase = '''
+         case "${variable.name}":
+          List<Dictionary<string, dynamic>> listDict${variable.name}s = Newtonsoft.Json.JsonConvert.DeserializeObject<List<Dictionary<string, dynamic>>>(properties["valueString"]);
+          List<${variable.singleType?.replaceAll('?', '')}> listDict${variable.name}sTemp = new List<${variable.singleType?.replaceAll('?', '')}>();
+           if (listDict${variable.name}s != null) {
+            foreach (Dictionary<string, dynamic> dict${variable.name} in listDict${variable.name}s)
+            {
+                ${variable.singleType?.replaceAll('?', '')}? temp = ${variable.singleType?.replaceAll('?', '')}.baseFromJson(dict${variable.name});
+                if (temp != null)
+                {
+                    listDict${variable.name}sTemp.Add(temp);
+                }
+            }
+            result$objectName.${variable.name} = listDict${variable.name}sTemp;
+          } else {
+            result$objectName.${variable.name} = null;
+          }
+          break;
+      ''';
+        result += newCase;
+      }
     }
     return result;
   }
 
-  String generateBaseFromJson(List<Variable> vars) {
+  String generateBaseFromJson(List<VariableCSharp> vars) {
     var declareFunc =
         'public static $objectName baseFromJson(Dictionary<string, dynamic> dictionary)';
     var declareObj = '$objectName returnObj = $objectName();';
@@ -118,7 +169,7 @@ class CSharpGeneratorModel {
 
     var fromJsonRows = '';
     for (var variable in vars) {
-      if (variable.isPrimaryType) {
+      if (variable.variableType == VariableType.primaryType) {
         var getProperty =
             '''List<Dictionary<string, dynamic>> property${variable.name} = properties.Where(prop => prop['propertyId'] == '${variable.name}';);''';
         fromJsonRows += '''
@@ -137,33 +188,117 @@ class CSharpGeneratorModel {
     //   }
     // ''';
     return '''
-    $objectName result$objectName = new $objectName();
-            foreach (var kv in json)
+    public static $objectName? baseFromJson(Dictionary<string, dynamic> json)
+    {
+      $objectName result$objectName = new $objectName();
+        foreach (var kv in json)
+        {
+            if (kv.Key == "${objectName?.lowerFirst()}Id")
             {
-                if (kv.Key == "${objectName?.lowerFirst()}Id")
+                result$objectName.id = kv.Value;
+            }
+            if (kv.Key == "properties")
+            {
+                List<Dictionary<string, dynamic>> listProperties = new List<Dictionary<string, dynamic>>();
+                JArray jsonItems = kv.Value;
+                foreach (var item in jsonItems)
                 {
-                    result$objectName.id = kv.Value;
+                    JObject jObject = (JObject)item;
+                    Dictionary<string, dynamic> tempDict = Newtonsoft.Json.JsonConvert.DeserializeObject<Dictionary<string, dynamic>>(jObject.ToString());
+                    listProperties.Add(tempDict);
                 }
-                if (kv.Key == "properties")
+                foreach (var properties in listProperties)
                 {
-                    List<Dictionary<string, dynamic>> listProperties = new List<Dictionary<string, dynamic>>();
-                    JArray jsonItems = kv.Value;
-                    foreach (var item in jsonItems)
+                    switch (properties["propertyId"])
                     {
-                        JObject jObject = (JObject)item;
-                        Dictionary<string, dynamic> tempDict = Newtonsoft.Json.JsonConvert.DeserializeObject<Dictionary<string, dynamic>>(jObject.ToString());
-                        listProperties.Add(tempDict);
-                    }
-                    foreach (var properties in listProperties)
-                    {
-                        switch (properties["propertyId"])
-                        {
-                            ${baseFromJsonCase(vars)}
-                        }
+                        ${baseFromJsonCase(vars)}
                     }
                 }
             }
-            return result$objectName;
+        }
+        return result$objectName;
+    }
+    ''';
+  }
+
+  String baseToJsonCase(List<VariableCSharp> vars) {
+    var result = "";
+    var lineValueString = "";
+    for (var variable in vars) {
+      switch (variable.variableType) {
+        case VariableType.primaryType:
+        case VariableType.enumType:
+          if (variable.type == "string") {
+            lineValueString =
+                'tempDict["valueString"] = objectModel.${variable.name};';
+          } else {
+            lineValueString =
+                'tempDict["valueString"] = objectModel.${variable.name}.ToString();';
+          }
+          break;
+        case VariableType.objectType:
+          lineValueString = '''
+            tempDict["valueString"] = ${variable.singleType}.baseToJson(objectModel.${variable.name}).ToString();
+          ''';
+          break;
+        case VariableType.listObjectType:
+          lineValueString = '''
+            List<Dictionary<string, dynamic>> list${variable.singleTypeNonNull} = new List<Dictionary<string, dynamic>>();
+            if (objectModel.${variable.name} != null) {
+                foreach (${variable.singleTypeNonNull} ${variable.singleTypeNonNull?.toLowerCase()} in objectModel.${variable.name})
+                {
+                    Dictionary<string, dynamic>? new${variable.singleTypeNonNull}Dict = ${variable.singleTypeNonNull}.baseToJson(${variable.singleTypeNonNull?.toLowerCase()});
+                    if (new${variable.singleTypeNonNull}Dict != null) {
+                      list${variable.singleType}.Add(new${variable.singleTypeNonNull}Dict);
+                    }
+                }
+                tempDict["valueString"] = list${variable.singleType}.ToArray().ToString();                              
+            } else {
+                tempDict["valueString"] = "null";                              
+            }
+            
+          ''';
+          break;
+        default:
+      }
+      result += '''
+        tempDict = new Dictionary<string, dynamic>();
+        tempDict["propertyId"] = "${variable.name}";
+        tempDict["description"] = "${variable.name}";
+        $lineValueString
+        tempDict["valueType"] =  ${variable.valueTypeInt};
+        tempDict["valueUnitOfMeasure"] = "";
+        propertiesDictList.Add(tempDict);
+
+      ''';
+    }
+    return result;
+  }
+
+  String generateBaseToJson(List<VariableCSharp> vars) {
+    return '''
+       public static Dictionary<string, dynamic>? baseToJson($objectName objectModel)
+        {
+            Dictionary<string, dynamic> newDict = new Dictionary<string, dynamic>();
+            if (objectModel.id != null)
+            {
+                newDict.Add("${objectName?.lowerFirst()}Id", objectModel.id);
+                newDict.Add("description", "");
+                List<Dictionary<string, dynamic>> propertiesDictList = new List<Dictionary<string, dynamic>>();
+                Dictionary<string, dynamic>[] propertiesArray = new Dictionary<string, dynamic>[${vars.length}];
+                Dictionary<string, dynamic> tempDict = new Dictionary<string, dynamic>();
+                ${baseToJsonCase(vars)}
+
+                int i = 0;
+                foreach(Dictionary<string, dynamic> dict in propertiesDictList)
+                {
+                    propertiesArray[i] = dict;
+                    i++;
+                }
+                newDict.Add("properties", propertiesArray);
+            }
+            return newDict;
+        }
     ''';
   }
 
@@ -292,10 +427,38 @@ class CSharpGeneratorModel {
   // }
 }
 
-class Variable {
+class VariableCSharp {
   String name;
   String type;
-  bool isPrimaryType;
-  Variable(
-      {required this.name, required this.type, required this.isPrimaryType});
+  VariableType variableType;
+  String? get singleType {
+    if (variableType == VariableType.listObjectType) {
+      return type.replaceAll('List<', '').replaceAll('>', '');
+    }
+    return null;
+  }
+
+  String? get singleTypeNonNull {
+    return singleType?.replaceAll("?", "");
+  }
+
+  String get valueTypeInt {
+    switch (type) {
+      case 'bool':
+        return "0";
+      case 'int':
+        return "1";
+      case 'decimal':
+        return "2";
+      case 'string':
+        return "3";
+      default:
+        return "4";
+    }
+  }
+
+  VariableCSharp(
+      {required this.name, required this.type, required this.variableType});
 }
+
+enum VariableType { primaryType, enumType, objectType, listObjectType }
